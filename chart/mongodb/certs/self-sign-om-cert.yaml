@@ -1,0 +1,16 @@
+apiVersion: cert-manager.io/v1alpha2
+kind: Certificate
+metadata:
+  name: yaml-for-om-https
+  namespace: mongodb
+spec:
+  secretName: yaml-for-om-https
+  duration: 8640h # 360d
+  renewBefore: 360h # 15d
+  issuerRef:
+    name: selfsigned-issuer
+  commonName: serviceName.NamespaceName.svc.cluster.local
+  dnsNames:
+  - ops-manager-svc.mongodb.svc.cluster.local
+  ipAddresses:
+  - 127.0.0.1

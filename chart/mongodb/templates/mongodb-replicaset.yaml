@@ -1,0 +1,94 @@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ops-manager-project
+  annotations:
+    helm.sh/hook-weight: "{{ .Values.wave4 }}"
+data:
+  baseUrl: {{ .Values.opsManager.url }} #sunj
+  #baseUrl: http://ops-manager-svc.mongodb.svc.cluster.local:8080
+  sslMMSCAConfigMap: om-http-cert-ca #sunj
+  sslRequireValidMMSServerCertificates: 'true' #sunj
+---
+apiVersion: mongodb.com/v1
+kind: MongoDB
+metadata:
+  name: mongodb-replica-set
+  annotations:
+    helm.sh/hook-weight: "{{ .Values.wave4 }}"
+spec:
+  members: {{ .Values.scaling.replicaCount }}
+  version: {{ .Values.mongodb.version }}
+  type: ReplicaSet
+  persistent: true
+  opsManager:
+    configMapRef:
+      name: ops-manager-project
+  credentials: mongodb-ops-manager-admin-key
+  security:
+    authentication:
+      enabled: true
+      modes:
+        - "SCRAM"
+    #sunj
+    tls:
+      enabled: true
+      ca: custom-ca
+    # /sunj
+  podSpec:
+    # 'podTemplate' allows to set custom fields in PodTemplateSpec.
+    # (https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.17/#podtemplatespec-v1-core)
+    # for the Database StatefulSet.
+    podTemplate:
+      spec:
+        containers:
+          - name: mongodb-enterprise-database
+            #sunj
+            lifecycle:
+              postStart:
+                exec:
+                  command: ["/bin/sh", "-c", "cat /etc/mongokey/..data/key > /tmp/enc-keyfile && chmod 0400 /tmp/enc-keyfile"] #copy, then change permissions
+            volumeMounts:
+            - name: encrkey
+              mountPath: "/etc/mongokey"
+            #/sunj
+            resources:
+              limits:
+                cpu: "1"
+                memory: 1Gi
+              requests:
+                cpu: 500m
+                memory: 500M
+          #sunj
+        volumes:
+        - name: encrkey
+          secret:
+            secretName: mongo-encryptkey
+            defaultMode: 256
+        #/sunj
+---
+apiVersion: mongodb.com/v1
+kind: MongoDBUser
+metadata:
+  name: mongodb-user
+  annotations:
+    helm.sh/hook-weight: "{{ .Values.wave4 }}"
+spec:
+  passwordSecretKeyRef:
+    name: mongo-dbuserpass
+    # Match to metadata.name of the User Secret
+    key: password
+  username: "appUser"
+  db: "admin" #
+  mongodbResourceRef:
+    name: mongodb-replica-set
+    # Match to MongoDB resource using authenticaiton
+  roles:
+    - db: "admin"
+      name: "clusterAdmin"
+    - db: "admin"
+      name: "dbAdminAnyDatabase"
+    - db: "admin"
+      name: "readWriteAnyDatabase"
+---

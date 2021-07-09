@@ -1,0 +1,17 @@
+apiVersion: cert-manager.io/v1alpha2
+kind: Certificate
+metadata:
+  name: depldb-certs-yaml
+  namespace: mongodb
+spec:
+  secretName: depldb-certs-yaml
+  isCA: false
+  usages:
+    - server auth
+    - client auth
+  dnsNames:
+  - "mongodb-replica-set-0.mongodb-replica-set-svc.mongodb.svc.cluster.local"
+  - "mongodb-replica-set-1.mongodb-replica-set-svc.mongodb.svc.cluster.local"
+  - "mongodb-replica-set-2.mongodb-replica-set-svc.mongodb.svc.cluster.local"
+  issuerRef:
+    name: db-ca-issuer

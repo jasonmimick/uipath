@@ -1,0 +1,46 @@
+---
+apiVersion: mongodb.com/v1
+kind: MongoDBOpsManager
+metadata:
+  name: ops-manager
+  labels:
+    app: ops-manager
+  namespace: {{ .Values.namespace }}
+  annotations:
+    helm.sh/hook-weight: "{{ .Values.wave3 }}"
+spec:
+  replicas: {{ .Values.scaling.opsManagerCount }}
+  version: {{ .Values.opsManager.version }}
+  adminCredentials: ops-manager-admin-secret
+  externalConnectivity:
+    type: NodePort
+  #sunj
+  security:
+    tls:
+      ca: om-http-cert-ca
+      secretRef:
+        name: om-http-cert
+  # /sunj
+  configuration:
+    mms.ignoreInitialUiSetup: "true"
+    automation.versions.source: mongodb
+    mms.adminEmailAddr: {{ .Values.mail.adminEmailAddr }}
+    mms.fromEmailAddr: {{ .Values.mail.fromEmailAddr }}
+    mms.replyToEmailAddr: {{ .Values.mail.replyToEmailAddr }}
+    mms.mail.hostname: {{ .Values.mail.hostname }}
+    mms.mail.port: "{{ .Values.mail.port }}"
+    mms.mail.ssl: "{{ .Values.mail.ssl }}"
+    mms.mail.transport: {{ .Values.mail.transport }}
+    mms.minimumTLSVersion: {{ .Values.mail.minimumTLSVersion }}
+  applicationDatabase:
+    members: 3
+    version: {{ .Values.opsManager.applicationDatabaseVersion }}
+    #sunj
+    security:
+      tls:
+        ca: "appdbca"
+        secretRef:
+          name: "appdb-certs"
+    # /sunj
+  backup:
+    enabled: false

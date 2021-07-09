@@ -1,0 +1,130 @@
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "mongodb-configure.name" . }}-wait-for-completion
+  namespace: {{ .Values.infra.namespace }}
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+spec:
+  backoffLimit: 3
+  template:
+    spec:
+      restartPolicy: Never
+      serviceAccountName: {{ .Values.serviceAccountName }}
+      {{ include "uipathImagePullSecrets" . | indent 6 }}
+      containers:
+      - name: {{ include "mongodb-configure.name" . }}-executer
+        image: {{ template "uipathRegistry" .}}{{ .Values.k8utils.image.repository }}:{{ .Values.k8utils.image.tag }}
+        #sunj
+        env:
+        - name: OPSMGRURL
+          value: "{{ .Values.opsManager.url }}"
+        - name: NAMESPACE
+          value: "{{ .Values.namespace }}"
+        #/sunj
+        command:
+          - /bin/bash
+          - -ec
+          - |
+            source /Modules/utils.sh
+            NAMESPACE=${NAMESPACE}
+            OPSMGRURL=${OPSMGRURL}
+            #NAMESPACE=mongodb
+            info "Wait till ops-manager-db statefulset is up and running"
+            wait_till_resource_exists $NAMESPACE statefulset ops-manager-db
+            wait_till_rollout $NAMESPACE statefulset ops-manager-db
+            wait_till_resource_exists $NAMESPACE statefulset ops-manager
+            wait_till_rollout $NAMESPACE statefulset ops-manager
+            wait_till_resource_exists $NAMESPACE statefulset mongodb-replica-set
+            wait_till_rollout $NAMESPACE statefulset mongodb-replica-set
+
+            try=0
+            maxtry=240
+            while [[ $(kubectl -n $NAMESPACE get mdb -o=json | jq -r '.items[0].status.phase') != "Running" ]]; do 
+              if [ $try == $maxtry ]; then
+              error "Mongo CRD is not in Running state"
+              fi
+
+              info "Waiting for Mongo CRD to become healthy !"
+              sleep 5
+              try=$((try+1))
+            done
+
+            #Validate DB Connectivity After the Install
+            USER_NAME=$(kubectl -n $NAMESPACE get secret mongo-admin-user -o json | jq -r '.data.USER_NAME' | base64 -d )
+            PASSWORD=$(kubectl -n $NAMESPACE get secret mongo-admin-user -o json | jq -r '.data.PASSWORD' | base64 -d )
+            #sunj
+            #kubectl -n $NAMESPACE exec -i mongodb-replica-set-0 -- sh -c '/var/lib/mongodb-mms-automation/mongodb-linux-x86_64-4.4.6-ent/bin/mongo -u '"$USER_NAME"' -p '"'"''"$PASSWORD"''"'"' --authenticationDatabase admin --eval '"'"'db.runCommand("ping").ok'"'"' --quiet'
+            kubectl -n $NAMESPACE exec -i mongodb-replica-set-0 -- sh -c '/var/lib/mongodb-mms-automation/mongodb-linux-x86_64-4.4.6-ent/bin/mongo --tls --tlsCAFile /mongodb-automation/ca.pem --host `hostname -f` -u '"$USER_NAME"' -p '"'"''"$PASSWORD"''"'"' --authenticationDatabase admin --eval '"'"'db.runCommand("ping").ok'"'"' --quiet'
+            #/sunj
+
+            #Apply Patch to enable SHA-1 
+            #sunj
+            #kubectl patch MongoDB mongodb-replica-set --type=json -p='[{"op": "remove", "path": "/spec/security/authentication"}]' -n mongodb 2>/dev/null || true
+            kubectl -n $NAMESPACE patch MongoDB mongodb-replica-set --type=json -p='[{"op": "remove", "path": "/spec/security/authentication"}]' 2>/dev/null || true
+            #/sunj
+            #reconcilation takes 2-3 seconds
+            sleep 15
+            USER=$(kubectl -n $NAMESPACE get secret mongodb-ops-manager-admin-key -o json | jq -r '.data.user' | base64 -d )
+            PUBLIC_API_KEY=$(kubectl -n $NAMESPACE get secret mongodb-ops-manager-admin-key -o json | jq -r '.data.publicApiKey' | base64 -d )
+
+            get_project_result=$(curl --user "$USER:$PUBLIC_API_KEY" --digest \
+                --header "Accept: application/json" \
+                --insecure \
+                --request GET "https://ops-manager-svc.mongodb.svc.cluster.local:8443/api/public/v1.0/groups")
+
+            project_id=$(echo $get_project_result | jq -r '.results[] | select(.name=="mongodb-replica-set") | .id')
+
+            if [ -z "$project_id" ]; then error "project_id is empty"; fi
+
+            curl --user "$USER:$PUBLIC_API_KEY" --digest \
+                --header "Accept: application/json" \
+                --insecure \
+                --request GET "https://ops-manager-svc.mongodb.svc.cluster.local:8443/api/public/v1.0/groups/${project_id}/automationConfig?pretty=true" \
+              --output /temp/currentAutomationConfig.json
+              
+            if [ ! -f "/temp/currentAutomationConfig.json" ]; then error "/temp/currentAutomationConfig.json does not exist."; fi
+
+            cat /temp/currentAutomationConfig.json | jq --arg new "MONGODB-CR" '.auth.deploymentAuthMechanisms? += [$new]' | jq --arg new "MONGODB-CR" '.auth.autoAuthMechanisms? += [$new]' > /temp/final.json 
+
+            response=$(curl --write-out '%{http_code}' --silent --output /dev/null --user "$USER:$PUBLIC_API_KEY" --digest \
+            --header "Accept: application/json" \
+            --header "Content-Type: application/json" \
+            --include \
+            --insecure \
+            --request PUT "https://ops-manager-svc.mongodb.svc.cluster.local:8443/api/public/v1.0/groups/${project_id}/automationConfig?pretty=true" \
+            --data-binary "@/temp/final.json")
+
+            if [[ ! $response -eq 200 ]];
+            then
+              error "API Call to enable SHA-1 authentication failed"
+            fi
+
+            sleep 10
+            #Validate DB Connectivity After the Patch is applied
+            #sunj
+            #kubectl -n $NAMESPACE exec -i mongodb-replica-set-0 -- sh -c '/var/lib/mongodb-mms-automation/mongodb-linux-x86_64-4.4.6-ent/bin/mongo -u '"$USER_NAME"' -p '"'"''"$PASSWORD"''"'"' --authenticationDatabase admin --eval '"'"'db.runCommand("ping").ok'"'"' --quiet'
+            kubectl -n $NAMESPACE exec -i mongodb-replica-set-0 -- sh -c '/var/lib/mongodb-mms-automation/mongodb-linux-x86_64-4.4.6-ent/bin/mongo --tls --tlsCAFile /mongodb-automation/ca.pem --host `hostname -f` -u '"$USER_NAME"' -p '"'"''"$PASSWORD"''"'"' --authenticationDatabase admin --eval '"'"'db.runCommand("ping").ok'"'"' --quiet'
+            #/sunj
+        volumeMounts:
+        - name: fabric-utils
+          mountPath: /Modules
+        - mountPath: /temp
+          name: temp
+        securityContext:
+          privileged: false
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          runAsUser: 9999
+          runAsGroup: 9999
+          runAsNonRoot: true
+          capabilities:
+            drop: ["NET_RAW"]
+      volumes:
+        - name: fabric-utils
+          configMap:
+            name: fabric-utils
+        - name: temp
+          emptyDir: {}
+---

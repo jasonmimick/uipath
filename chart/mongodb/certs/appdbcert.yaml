@@ -1,0 +1,17 @@
+apiVersion: cert-manager.io/v1alpha2
+kind: Certificate
+metadata:
+  name: yaml-for-appdb-crt
+  namespace: mongodb
+spec:
+  secretName: yaml-for-appdb-crt
+  isCA: false
+  usages:
+    - server auth
+    - client auth
+  dnsNames:
+  - "ops-manager-db-0.ops-manager-db-svc.mongodb.svc.cluster.local"
+  - "ops-manager-db-1.ops-manager-db-svc.mongodb.svc.cluster.local"
+  - "ops-manager-db-2.ops-manager-db-svc.mongodb.svc.cluster.local"
+  issuerRef:
+    name: db-ca-issuer

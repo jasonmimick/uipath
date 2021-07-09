@@ -1,0 +1,24 @@
+
+scaling:
+  replicaCount: 1
+
+ha: false
+connectionString: "mongodb-replica-set-0.mongodb-replica-set-svc.mongodb.svc.cluster.local:27017/?replicaSet=mongodb-replica-set"
+
+## Registry
+registry:
+  imagePullSecrets:
+  # TODO: specify for each image and move there?
+  pullPolicy: Always
+  # Specify if images are pulled from private registry
+  operator: mongodb
+  database: mongodb
+  initDatabase: mongodb
+  initOpsManager: mongodb
+  opsManager: mongodb
+  initAppDb: mongodb
+  appDb: mongodb
+  agent: mongodb
+
+mongodb:
+  repo: mongodb

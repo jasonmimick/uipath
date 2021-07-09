@@ -1,0 +1,8 @@
+apiVersion: cert-manager.io/v1alpha2
+kind: Issuer
+metadata:
+  name: db-ca-issuer
+  namespace: mongodb
+spec:
+  ca:
+    secretName: db-ca-tls

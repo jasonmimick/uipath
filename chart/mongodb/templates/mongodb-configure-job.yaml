@@ -1,0 +1,162 @@
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "mongodb-configure.name" . }}-script-job
+  namespace: {{ .Values.infra.namespace }}
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-delete-policy: before-hook-creation
+spec:
+  backoffLimit: 2
+  template:
+    spec:
+      restartPolicy: Never
+      serviceAccountName: {{ .Values.serviceAccountName }}
+      {{ include "uipathImagePullSecrets" . | indent 6 }}
+      containers:
+      - name: {{ include "mongodb-configure.name" . }}-executer
+        image: {{ template "uipathRegistry" .}}{{ .Values.k8utils.image.repository }}:{{ .Values.k8utils.image.tag }}
+        env:
+        - name: HA
+          value: "{{ .Values.ha }}"
+        - name: CONNECTION_STRING
+          value: "{{ .Values.connectionString }}"
+        - name: OPS_MANAGER_USER_NAME
+          value: "{{ .Values.opsManager.userName }}"
+        - name: OPS_MANAGER_FIRST_NAME
+          value: "{{ .Values.opsManager.firstName }}"
+        - name: OPS_MANAGER_LAST_NAME
+          value: "{{ .Values.opsManager.lastName }}"
+        - name: MONGODB_ADMIN_USER
+          value: "{{ .Values.mongodb.adminUser }}"
+        - name: NAMESPACE
+          value: "{{ .Values.namespace }}"
+        command:
+          - /bin/bash
+          - -ec
+          - |
+            source /Modules/utils.sh
+            OPS_MANAGER_PASSWORD=$(generate_password)
+            MONGO_ADMIN_PASSWORD=$(generate_password)
+            MONGO_ENCRYPT_KEY=$(generate_encr_key) #to be added #sunj
+            USER_NAME=${OPS_MANAGER_USER_NAME}
+            FIRSTNAME=${OPS_MANAGER_FIRST_NAME}
+            LASTNAME=${OPS_MANAGER_LAST_NAME}
+            ADMIN_USER=${MONGODB_ADMIN_USER}
+            NAMESPACE=${NAMESPACE}
+
+            #cleaning the secrets, configmaps and pvcs left over by previous deployment
+            existing_secret_count=$(kubectl -n "$NAMESPACE" get secret --ignore-not-found -o name | grep -E 'ops-manager-admin-secret' | wc -l)
+            deploy_count=$(kubectl -n "$NAMESPACE" get deploy --ignore-not-found -o name | grep mongodb-enterprise-operator | wc -l)
+            statefulset_count=$(kubectl -n "$NAMESPACE" get statefulset --ignore-not-found -o name | grep -E 'mongodb-replica-set|ops-manager' | wc -l)
+
+            if [[ "$existing_secret_count" -gt 0 && "$deploy_count" -eq 0 && "$statefulset_count" -eq 0 ]];
+            then
+              #sunj
+              #kubectl -n "$NAMESPACE" get secret --ignore-not-found -o name | grep -E 'ops-manager-|mongodb-enterprise-|mongo-dbuserpass|mongo-admin-user|-group-secret' | \
+              #    xargs -l1 --no-run-if-empty -- sh -c 'kubectl -n "'"$NAMESPACE"'" delete $0'
+              #kubectl -n "$NAMESPACE" get cm --ignore-not-found -o name | grep -E 'ops-manager-' | \
+              kubectl -n "$NAMESPACE" get secret --ignore-not-found -o name | grep -E 'ops-manager-|mongodb-enterprise-|mongo-dbuserpass|mongo-admin-user|-group-secret|mongo-encryptkey|mongodb-replica-set-cert|om-http-cert|appdb-certs' | \
+                  xargs -l1 --no-run-if-empty -- sh -c 'kubectl -n "'"$NAMESPACE"'" delete $0'
+              kubectl -n "$NAMESPACE" get cm --ignore-not-found -o name | grep -E 'ops-manager-|om-http-cert-ca|appdbca|custom-ca' | \
+              #/sunj
+                  xargs -l1 --no-run-if-empty -- sh -c 'kubectl -n "'"$NAMESPACE"'" delete $0'
+              kubectl -n "$NAMESPACE" get pvc --ignore-not-found -o name  | grep -E 'data-mongodb-replica-|data-ops-manager' | \
+                  xargs -l1 --no-run-if-empty -- sh -c 'kubectl -n "'"$NAMESPACE"'" delete $0'
+            fi
+
+            info "Creating secret ops-manager-admin-secret !"
+            kubectl -n "$NAMESPACE" create secret generic ops-manager-admin-secret --from-literal=Username="$USER_NAME" \
+                --from-literal=Password="$OPS_MANAGER_PASSWORD" \
+                --from-literal=FirstName="$FIRSTNAME" \
+                --from-literal=LastName="$LASTNAME" 2>/dev/null || true
+
+            #sunj
+            info "Creating secret mongo-encryptkey !"
+            kubectl -n "$NAMESPACE" create secret generic mongo-encryptkey --from-literal=key="$MONGO_ENCRYPT_KEY" 2>/dev/null || true
+            # /sunj
+
+            info "Creating secret mongo-dbuserpass !"
+            kubectl -n "$NAMESPACE" create secret generic mongo-dbuserpass --from-literal=password="$MONGO_ADMIN_PASSWORD" 2>/dev/null || true
+
+            MONGO_EX_ADMIN_PASSWORD=$(kubectl -n "$NAMESPACE" get secret mongo-dbuserpass -o json | jq -r '.data.password' | base64 -d )
+            MONGO_URL_ENCODED_PASSWORD=$(urlencode $MONGO_EX_ADMIN_PASSWORD)
+
+            kubectl -n "$NAMESPACE" create secret generic mongo-admin-user --save-config --dry-run=1 \
+                --from-literal=CONNECTION_STRING="$CONNECTION_STRING" --from-literal=USER_NAME="$ADMIN_USER" \
+                --from-literal=PASSWORD="$MONGO_EX_ADMIN_PASSWORD" \
+                --from-literal=URL_ENCODED_PASSWORD="$MONGO_URL_ENCODED_PASSWORD" \
+                -o yaml | kubectl apply -f -
+            label_object "$NAMESPACE" secret mongo-admin-user
+
+            #sunj
+            info "extracting certs, et al from secrets and creating relevant files"
+            #cleanup if the dir already exists
+            rm -rf /tmp/.certs || true
+            mkdir /tmp/.certs
+            mkdir /tmp/.certs/om
+            kubectl -n "$NAMESPACE" get secret/yaml-for-om-https -o jsonpath='{.data.ca\.crt}' | base64 -d > /tmp/.certs/om/mms-ca.crt
+            kubectl -n "$NAMESPACE" get secret/yaml-for-om-https -o jsonpath='{.data.tls\.crt}' | base64 -d > /tmp/.certs/om/tls.crt
+            kubectl -n "$NAMESPACE" get secret/yaml-for-om-https -o jsonpath='{.data.tls\.key}' | base64 -d > /tmp/.certs/om/tls.key
+            cat /tmp/.certs/om/tls.key /tmp/.certs/om/tls.crt > /tmp/.certs/om/server.pem
+            kubectl -n "$NAMESPACE" create secret generic om-http-cert --from-file="/tmp/.certs/om/server.pem"
+
+            #this won't work on airgapped machine
+            /usr/bin/openssl s_client -showcerts -verify 2 -connect downloads.mongodb.com:443 < /dev/null | awk '/BEGIN/,/END/{ if(/BEGIN/){a++}; out="/tmp/.certs/cert"a".crt"; print >out}'
+
+            cat /tmp/.certs/cert1.crt /tmp/.certs/cert2.crt /tmp/.certs/cert3.crt /tmp/.certs/cert4.crt  >> /tmp/.certs/om/mms-ca.crt
+
+            kubectl -n "$NAMESPACE" create configmap om-http-cert-ca --from-file="/tmp/.certs/om/mms-ca.crt"
+            #appdb
+            mkdir /tmp/.certs/appdb
+            kubectl -n "$NAMESPACE" get secret/yaml-for-appdb-crt -o jsonpath='{.data.ca\.crt}' | base64 -d > /tmp/.certs/appdb/ca-pem
+            kubectl -n "$NAMESPACE" get secret/yaml-for-appdb-crt -o jsonpath='{.data.tls\.crt}' | base64 -d > /tmp/.certs/appdb/tls.crt
+            kubectl -n "$NAMESPACE" get secret/yaml-for-appdb-crt -o jsonpath='{.data.tls\.key}' | base64 -d > /tmp/.certs/appdb/tls.key
+
+            cat /tmp/.certs/appdb/tls.key /tmp/.certs/appdb/tls.crt > /tmp/.certs/appdb/ops-manager-db-0-pem
+            cat /tmp/.certs/appdb/tls.key /tmp/.certs/appdb/tls.crt > /tmp/.certs/appdb/ops-manager-db-1-pem
+            cat /tmp/.certs/appdb/tls.key /tmp/.certs/appdb/tls.crt > /tmp/.certs/appdb/ops-manager-db-2-pem
+            kubectl -n "$NAMESPACE" create secret generic appdb-certs --from-file=/tmp/.certs/appdb/ops-manager-db-0-pem --from-file=/tmp/.certs/appdb/ops-manager-db-1-pem --from-file=/tmp/.certs/appdb/ops-manager-db-2-pem
+
+            cat /tmp/.certs/cert1.crt /tmp/.certs/cert2.crt /tmp/.certs/cert3.crt /tmp/.certs/cert4.crt  >> /tmp/.certs/appdb/ca-pem
+
+            kubectl -n "$NAMESPACE" create configmap appdbca --from-file="/tmp/.certs/appdb/ca-pem"
+
+            #deploymentdb
+            mkdir /tmp/.certs/depdb
+            kubectl -n "$NAMESPACE" get secret/depldb-certs-yaml -o jsonpath='{.data.ca\.crt}' | base64 -d > /tmp/.certs/depdb/ca-pem
+            kubectl -n "$NAMESPACE" get secret/depldb-certs-yaml -o jsonpath='{.data.tls\.crt}' | base64 -d > /tmp/.certs/depdb/tls.crt
+            kubectl -n "$NAMESPACE" get secret/depldb-certs-yaml -o jsonpath='{.data.tls\.key}' | base64 -d > /tmp/.certs/depdb/tls.key
+
+            cat /tmp/.certs/depdb/tls.key /tmp/.certs/depdb/tls.crt > /tmp/.certs/depdb/mongodb-replica-set-0-pem
+            cat /tmp/.certs/depdb/tls.key /tmp/.certs/depdb/tls.crt > /tmp/.certs/depdb/mongodb-replica-set-1-pem
+            cat /tmp/.certs/depdb/tls.key /tmp/.certs/depdb/tls.crt > /tmp/.certs/depdb/mongodb-replica-set-2-pem
+            kubectl -n "$NAMESPACE" create secret generic mongodb-replica-set-cert --from-file=/tmp/.certs/depdb/mongodb-replica-set-0-pem --from-file=/tmp/.certs/depdb/mongodb-replica-set-1-pem --from-file=/tmp/.certs/depdb/mongodb-replica-set-2-pem
+
+            kubectl -n "$NAMESPACE" create configmap custom-ca --from-file=/tmp/.certs/depdb/ca-pem
+
+            #/sunj
+
+
+        volumeMounts:
+        - mountPath: /tmp
+          name: tmp
+        - name: fabric-utils
+          mountPath: /Modules
+        securityContext:
+          privileged: false
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          runAsUser: 9999
+          runAsGroup: 9999
+          runAsNonRoot: true
+          capabilities:
+            drop: ["NET_RAW"]
+      volumes:
+        - name: fabric-utils
+          configMap:
+            name: fabric-utils
+        - emptyDir: {}
+          name: tmp
+---

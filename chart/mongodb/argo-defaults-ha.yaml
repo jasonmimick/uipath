@@ -1,0 +1,6 @@
+scaling:
+  replicaCount: 3
+
+ha: true
+connectionString: "mongodb-replica-set-0.mongodb-replica-set-svc.mongodb.svc.cluster.local:27017,mongodb-replica-set-1.mongodb-replica-set-svc.mongodb.svc.cluster.local:27017,mongodb-replica-set-2.mongodb-replica-set-svc.mongodb.svc.cluster.local:27017/?replicaSet=mongodb-replica-set"
+
